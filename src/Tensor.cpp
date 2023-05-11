@@ -362,8 +362,9 @@ Tensor::getPrimaryMemoryPropertyFlags()
             return vk::MemoryPropertyFlagBits::eDeviceLocal;
             break;
         case TensorTypes::eHost:
-            return vk::MemoryPropertyFlagBits::eHostVisible |
-                   vk::MemoryPropertyFlagBits::eHostCoherent;
+            return vk::MemoryPropertyFlagBits::eHostVisible  |
+                   vk::MemoryPropertyFlagBits::eHostCoherent |
+                   vk::MemoryPropertyFlagBits::eHostCached;
             break;
         case TensorTypes::eStorage:
             return vk::MemoryPropertyFlagBits::eDeviceLocal;
