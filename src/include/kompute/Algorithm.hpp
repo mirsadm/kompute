@@ -2,8 +2,6 @@
 #pragma once
 
 #include "kompute/Core.hpp"
-
-#include "fmt/format.h"
 #include "kompute/Tensor.hpp"
 #include "logger/Logger.hpp"
 
@@ -219,11 +217,9 @@ class Algorithm
           this->mPushConstantsDataTypeMemorySize * this->mPushConstantsSize;
 
         if (totalSize != previousTotalSize) {
-            throw std::runtime_error(fmt::format(
-              "Kompute Algorithm push "
-              "constant total memory size provided is {} but expected {} bytes",
-              totalSize,
-              previousTotalSize));
+            throw std::runtime_error(std::string(
+              "Kompute Algorithm push constant total memory size provided is ") + std::to_string(totalSize) +
+              " but expected " + std::to_string(previousTotalSize));
         }
         if (this->mPushConstantsData) {
             free(this->mPushConstantsData);
