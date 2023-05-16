@@ -362,9 +362,14 @@ Tensor::getPrimaryMemoryPropertyFlags()
             return vk::MemoryPropertyFlagBits::eDeviceLocal;
             break;
         case TensorTypes::eHost:
+#ifdef __ANDROID__
+            return vk::MemoryPropertyFlagBits::eHostVisible  |
+                   vk::MemoryPropertyFlagBits::eHostCoherent;
+#else
             return vk::MemoryPropertyFlagBits::eHostVisible  |
                    vk::MemoryPropertyFlagBits::eHostCoherent |
                    vk::MemoryPropertyFlagBits::eHostCached;
+#endif
             break;
         case TensorTypes::eStorage:
             return vk::MemoryPropertyFlagBits::eDeviceLocal;
