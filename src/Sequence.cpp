@@ -214,9 +214,8 @@ Sequence::destroy()
         return;
     }
 
-    if (this->mFence) {
-        this->mDevice->destroy(
-          this->mFence, (vk::Optional<const vk::AllocationCallbacks>)nullptr);
+    if(this->mFence) {
+        this->mDevice->destroy(this->mFence, (vk::Optional<const vk::AllocationCallbacks>)nullptr);
     }
 
     if (this->mFreeCommandBuffer) {
@@ -312,8 +311,8 @@ Sequence::createCommandPool()
 
     this->mFreeCommandPool = true;
 
-    vk::CommandPoolCreateInfo commandPoolInfo(
-      vk::CommandPoolCreateFlagBits::eResetCommandBuffer, this->mQueueIndex);
+    vk::CommandPoolCreateInfo commandPoolInfo(vk::CommandPoolCreateFlags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT),
+                                              this->mQueueIndex);
     this->mCommandPool = std::make_shared<vk::CommandPool>();
     this->mDevice->createCommandPool(
       &commandPoolInfo, nullptr, this->mCommandPool.get());
