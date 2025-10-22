@@ -3,7 +3,11 @@
 #include "kompute/Memory.hpp"
 #include "kompute/Image.hpp"
 #include "kompute/Tensor.hpp"
+#if KOMPUTE_OPT_USE_SPDLOG
+#include <spdlog/fmt/fmt.h>
+#else
 #include <fmt/core.h>
+#endif
 
 namespace kp {
 
@@ -12,9 +16,10 @@ Memory::Memory(std::shared_ptr<vk::PhysicalDevice> physicalDevice,
                const DataTypes& dataType,
                const MemoryTypes& memoryType,
                uint32_t x,
-               uint32_t y)
+               uint32_t y,
+               uint32_t z)
 {
-    if (x == 0 || y == 0) {
+    if (x == 0 || y == 0 || z == 0) {
         throw std::runtime_error(
           "Kompute Memory attempted to create a zero-sized memory object");
     }
@@ -26,6 +31,7 @@ Memory::Memory(std::shared_ptr<vk::PhysicalDevice> physicalDevice,
     this->mDataTypeMemorySize = Memory::dataTypeMemorySize(dataType);
     this->mX = x;
     this->mY = y;
+    this->mZ = z;
 }
 
 std::string
@@ -63,6 +69,8 @@ Memory::toString(Memory::DataTypes dt)
             return "eUnsignedInt";
         case DataTypes::eFloat:
             return "eFloat";
+        case DataTypes::eFloat16:
+            return "eFloat16";            
         case DataTypes::eDouble:
             return "eDouble";
         default:
@@ -108,6 +116,8 @@ Memory::dataTypeMemorySize(DataTypes dt)
             return sizeof(uint32_t);
         case DataTypes::eFloat:
             return sizeof(float);
+        case DataTypes::eFloat16:
+            return sizeof(uint16_t);            
         case DataTypes::eDouble:
             return sizeof(double);
         default:

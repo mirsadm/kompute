@@ -160,7 +160,11 @@ class Sequence : public std::enable_shared_from_this<Sequence>
      *
      * @return Boolean stating whether execution was successful.
      */
-    std::shared_ptr<Sequence> evalAsync();
+    std::shared_ptr<Sequence> evalAsync(
+        std::shared_ptr<const vk::Semaphore> waitSemaphore=nullptr,
+        std::shared_ptr<const vk::Semaphore> signalSemaphore=nullptr,
+        vk::PipelineStageFlags waitStageMask = vk::PipelineStageFlagBits::eComputeShader);
+
     /**
      * Clears currnet operations to record provided one in the vector of
      * operations into the gpu as a submit job without a barrier. EvalAwait()
@@ -226,7 +230,12 @@ class Sequence : public std::enable_shared_from_this<Sequence>
      * Return the timestamps that were latched at the beginning and
      * after each operation during the last eval() call.
      */
-    std::vector<std::uint64_t> getTimestamps();
+    std::vector<std::uint64_t> getTimestamps() const;
+
+    /**
+     * Get the command buffer
+     */
+    const vk::CommandBuffer& getCommandBuffer() const;
 
     /**
      * Begins recording commands for commands to be submitted into the command

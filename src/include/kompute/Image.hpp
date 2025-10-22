@@ -4,6 +4,7 @@
 #include "kompute/Core.hpp"
 #include "kompute/Memory.hpp"
 #include "kompute/Tensor.hpp"
+#include "kompute/Sampler.hpp"
 #include "logger/Logger.hpp"
 #include <memory>
 #include <string>
@@ -30,6 +31,7 @@ class Image : public Memory
      *  @param dataSize Size in bytes of the data pointed to by \p data
      *  @param x Width of the image in pixels
      *  @param y Height of the image in pixels
+     *  @param z Depth of the image in pixels
      *  @param numChannels The number of channels in the image
      *  @param dataType Data type for the image which is of type DataTypes
      *  @param memoryType Type for the image which is of type MemoryTypes
@@ -41,11 +43,14 @@ class Image : public Memory
           size_t dataSize,
           uint32_t x,
           uint32_t y,
+          uint32_t z,
           uint32_t numChannels,
           const DataTypes& dataType,
           vk::ImageTiling tiling,
-          const MemoryTypes& memoryType = MemoryTypes::eDevice)
-      : Memory(physicalDevice, device, dataType, memoryType, x, y)
+          const MemoryTypes& memoryType = MemoryTypes::eDevice,
+          std::shared_ptr<Sampler> sampler=nullptr)
+      : Memory(physicalDevice, device, dataType, memoryType, x, y, z),
+        mSampler(sampler)
     {
         if (dataType == DataTypes::eCustom) {
             throw std::runtime_error(
@@ -56,12 +61,40 @@ class Image : public Memory
     }
 
     /**
+     * Wrap an existing resource
+     */
+    Image(std::shared_ptr<vk::PhysicalDevice> physicalDevice,
+          std::shared_ptr<vk::Device> device,
+          std::shared_ptr<vk::Image> image,
+          std::shared_ptr<vk::ImageView> imageView,
+          uint32_t x,
+          uint32_t y,
+          uint32_t z,
+          uint32_t numChannels,
+          const DataTypes& dataType,
+          std::shared_ptr<Sampler> sampler=nullptr)
+      : Memory(physicalDevice, device, dataType, MemoryTypes::eDevice, x, y, z),
+        mNumChannels(numChannels),
+        mImageView(imageView),
+        mTiling(vk::ImageTiling::eOptimal),        
+        mPrimaryImage(image),
+        mSampler(sampler)
+    {
+        this->mDescriptorType = sampler == nullptr ?
+          vk::DescriptorType::eStorageImage : vk::DescriptorType::eCombinedImageSampler;
+
+        this->mSize = this->getX() * this->getY() * this->getZ() * this->mNumChannels;
+        this->mExternallyManaged = true;
+    }
+
+    /**
      *  Constructor with no data provided.
      *
      *  @param physicalDevice The physical device to use to fetch properties
      *  @param device The device to use to create the image and memory from
      *  @param x Width of the image in pixels
      *  @param y Height of the image in pixels
+     *  @param z Depth of the image in pixels
      *  @param dataType Data type for the image which is of type ImageDataTypes
      *  @param memoryType Type for the image which is of type MemoryTypes
      *  @param tiling Tiling mode to use for the image.
@@ -70,20 +103,24 @@ class Image : public Memory
           std::shared_ptr<vk::Device> device,
           uint32_t x,
           uint32_t y,
+          uint32_t z,
           uint32_t numChannels,
           const DataTypes& dataType,
           vk::ImageTiling tiling,
-          const MemoryTypes& memoryType = MemoryTypes::eDevice)
+          const MemoryTypes& memoryType = MemoryTypes::eDevice,
+          std::shared_ptr<Sampler> sampler=nullptr)
       : Image(physicalDevice,
               device,
               nullptr,
               0,
               x,
               y,
+              z,
               numChannels,
               dataType,
               tiling,
-              memoryType)
+              memoryType,
+              sampler)
     {
     }
 
@@ -98,6 +135,7 @@ class Image : public Memory
      *  @param dataSize Size in bytes of the data pointed to by \p data
      *  @param x Width of the image in pixels
      *  @param y Height of the image in pixels
+     *  @param z Depth of the image in pixels
      *  @param numChannels The number of channels in the image
      *  @param dataType Data type for the image which is of type DataTypes
      *  @param memoryType Type for the image which is of type MemoryTypes
@@ -108,10 +146,13 @@ class Image : public Memory
           size_t dataSize,
           uint32_t x,
           uint32_t y,
+          uint32_t z,
           uint32_t numChannels,
           const DataTypes& dataType,
-          const MemoryTypes& memoryType = MemoryTypes::eDevice)
-      : Memory(physicalDevice, device, dataType, memoryType, x, y)
+          const MemoryTypes& memoryType = MemoryTypes::eDevice,
+          std::shared_ptr<Sampler> sampler=nullptr)
+      : Memory(physicalDevice, device, dataType, memoryType, x, y, z),
+        mSampler(sampler)
     {
         vk::ImageTiling tiling;
 
@@ -142,6 +183,7 @@ class Image : public Memory
      *  @param device The device to use to create the image and memory from
      *  @param x Width of the image in pixels
      *  @param y Height of the image in pixels
+     *  @param z Depth of the image in pixels
      *  @param dataType Data type for the image which is of type ImageDataTypes
      *  @param memoryType Type for the image which is of type MemoryTypes
      */
@@ -149,18 +191,22 @@ class Image : public Memory
           std::shared_ptr<vk::Device> device,
           uint32_t x,
           uint32_t y,
+          uint32_t z,
           uint32_t numChannels,
           const DataTypes& dataType,
-          const MemoryTypes& memoryType = MemoryTypes::eDevice)
+          const MemoryTypes& memoryType = MemoryTypes::eDevice,
+          std::shared_ptr<Sampler> sampler=nullptr)
       : Image(physicalDevice,
               device,
               nullptr,
               0,
               x,
               y,
+              z,
               numChannels,
               dataType,
-              memoryType)
+              memoryType,
+              sampler)
     {
     }
 
@@ -300,6 +346,8 @@ class Image : public Memory
       uint32_t binding) override;
 
     std::shared_ptr<vk::Image> getPrimaryImage();
+    std::shared_ptr<vk::ImageView> getImageView();
+
     vk::ImageLayout getPrimaryImageLayout();
 
     /***
@@ -310,6 +358,29 @@ class Image : public Memory
     uint32_t getNumChannels();
 
     Type type() override { return Type::eImage; }
+
+    /***
+     * Does the image use a sampler?
+     *
+     * @return true if sampled
+     */
+    bool isSampled() const {
+      return mSampler != nullptr;
+    }
+
+    /***
+     * Get vulkan staging image
+     *
+     * @return Returns the underlying staging image
+     */
+    std::shared_ptr<vk::Image> getStagingImage() const {
+      return mStagingImage;
+    }
+
+    /***
+     * Get vulkan staging image layout
+     */
+    void getStagingImageLayout(int& dstOffset, int& dstSize, int& dstRowPitch, int& dstArrayPitch, int& dstDepthPitch) const;
 
   protected:
     // -------------- ALWAYS OWNED RESOURCES
@@ -326,6 +397,8 @@ class Image : public Memory
     bool mFreePrimaryImage = false;
     std::shared_ptr<vk::Image> mStagingImage;
     bool mFreeStagingImage = false;
+    std::shared_ptr<Sampler> mSampler;
+    bool mExternallyManaged = false;
 
     void allocateMemoryCreateGPUResources(); // Creates the vulkan image
     void createImage(std::shared_ptr<vk::Image> image,
@@ -403,19 +476,23 @@ class ImageT : public Image
            const std::vector<T>& data,
            uint32_t x,
            uint32_t y,
+           uint32_t z,
            uint32_t numChannels,
            vk::ImageTiling tiling,
-           const MemoryTypes& imageType = MemoryTypes::eDevice)
+           const MemoryTypes& imageType = MemoryTypes::eDevice,
+           std::shared_ptr<Sampler> sampler=nullptr)
       : Image(physicalDevice,
               device,
               (void*)data.data(),
               data.size(),
               x,
               y,
+              z,
               numChannels,
               Memory::dataType<T>(),
               tiling,
-              imageType)
+              imageType,
+              sampler)
     {
         // Images cannot be created with custom types
         static_assert(Memory::dataType<T>() != DataTypes::eCustom,
@@ -434,17 +511,21 @@ class ImageT : public Image
            const std::vector<T>& data,
            uint32_t x,
            uint32_t y,
+           uint32_t z,
            uint32_t numChannels,
-           const MemoryTypes& imageType = MemoryTypes::eDevice)
+           const MemoryTypes& imageType = MemoryTypes::eDevice,
+           std::shared_ptr<Sampler> sampler=nullptr)
       : Image(physicalDevice,
               device,
               (void*)data.data(),
               data.size(),
               x,
               y,
+              z,
               numChannels,
               Memory::dataType<T>(),
-              imageType)
+              imageType,
+              sampler)
     {
         // Images cannot be created with custom types
         static_assert(Memory::dataType<T>() != DataTypes::eCustom,
@@ -462,17 +543,21 @@ class ImageT : public Image
            std::shared_ptr<vk::Device> device,
            uint32_t x,
            uint32_t y,
+           uint32_t z,
            uint32_t numChannels,
            vk::ImageTiling tiling,
-           const MemoryTypes& imageType = MemoryTypes::eDevice)
+           const MemoryTypes& imageType = MemoryTypes::eDevice,
+           std::shared_ptr<Sampler> sampler=nullptr)
       : Image(physicalDevice,
               device,
               x,
               y,
+              z,
               numChannels,
               Memory::dataType<T>(),
               tiling,
-              imageType)
+              imageType,
+              sampler)
     {
         // Images cannot be created with custom types
         static_assert(Memory::dataType<T>() != DataTypes::eCustom,
@@ -489,15 +574,19 @@ class ImageT : public Image
            std::shared_ptr<vk::Device> device,
            uint32_t x,
            uint32_t y,
+           uint32_t z,
            uint32_t numChannels,
-           const MemoryTypes& imageType = MemoryTypes::eDevice)
+           const MemoryTypes& imageType = MemoryTypes::eDevice,
+           std::shared_ptr<Sampler> sampler=nullptr)
       : Image(physicalDevice,
               device,
               x,
               y,
+              z,
               numChannels,
               Memory::dataType<T>(),
-              imageType)
+              imageType,
+              sampler)
     {
         // Images cannot be created with custom types
         static_assert(Memory::dataType<T>() != DataTypes::eCustom,

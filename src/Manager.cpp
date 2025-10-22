@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "kompute/Manager.hpp"
-#include "fmt/format.h"
 #include "kompute/logger/Logger.hpp"
+#if KOMPUTE_OPT_USE_SPDLOG
+#include <spdlog/fmt/fmt.h>
+#include <spdlog/fmt/ranges.h>
+#else
 #include <fmt/core.h>
+#include <fmt/ranges.h>
+#endif
 #include <iterator>
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 namespace kp {
 
@@ -45,6 +51,7 @@ Manager::Manager()
 
 Manager::Manager(uint32_t physicalDeviceIndex,
                  const std::vector<uint32_t>& familyQueueIndices,
+                 const std::vector<std::string>& instanceExtensions,
                  const std::vector<std::string>& desiredExtensions)
 {
     this->mManageResources = true;
@@ -54,7 +61,7 @@ Manager::Manager(uint32_t physicalDeviceIndex,
     logger::setupLogger();
 #endif
 
-    this->createInstance();
+    this->createInstance(instanceExtensions);
     this->createDevice(
       familyQueueIndices, physicalDeviceIndex, desiredExtensions);
 }
@@ -115,14 +122,15 @@ Manager::destroy()
         this->mManagedAlgorithms.clear();
     }
 
-    if (this->mManageResources && this->mManagedTensors.size()) {
-        KP_LOG_DEBUG("Kompute Manager explicitly freeing tensors");
-        for (const std::weak_ptr<Tensor>& weakTensor : this->mManagedTensors) {
-            if (std::shared_ptr<Tensor> tensor = weakTensor.lock()) {
-                tensor->destroy();
+    if (this->mManageResources && this->mManagedMemObjects.size()) {
+        KP_LOG_DEBUG("Kompute Manager explicitly freeing memory objects");
+        for (const std::weak_ptr<Memory>& weakMemory :
+             this->mManagedMemObjects) {
+            if (std::shared_ptr<Memory> memory = weakMemory.lock()) {
+                memory->destroy();
             }
         }
-        this->mManagedTensors.clear();
+        this->mManagedMemObjects.clear();
     }
 
     if (this->mFreeDevice) {
@@ -156,17 +164,9 @@ Manager::destroy()
 }
 
 void
-Manager::createInstance()
+Manager::createInstance(const std::vector<std::string>& instanceExtensions)
 {
-
     KP_LOG_DEBUG("Kompute Manager creating instance");
-
-#if VK_USE_PLATFORM_ANDROID_KHR
-    vk::DynamicLoader dl;
-    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
-      dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
-#endif // VK_USE_PLATFORM_ANDROID_KHR
 
     this->mFreeInstance = true;
 
@@ -184,14 +184,21 @@ Manager::createInstance()
 #endif
 
     vk::InstanceCreateInfo computeInstanceCreateInfo;
+    computeInstanceCreateInfo.pApplicationInfo = &applicationInfo;
 
 #ifdef __APPLE__
+    // Required for backwards compatibility for MacOS M1 devices
+    // https://stackoverflow.com/questions/72374316/validation-error-on-device-extension-on-m1-mac
     applicationExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    applicationExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
-    computeInstanceCreateInfo.flags = vk::InstanceCreateFlags(VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR);
+    computeInstanceCreateInfo.flags |=
+      vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
 #endif
-    
-    computeInstanceCreateInfo.pApplicationInfo = &applicationInfo;
+
+    for(auto& e : instanceExtensions)
+        applicationExtensions.push_back(e.c_str());
+
     if (!applicationExtensions.empty()) {
         computeInstanceCreateInfo.enabledExtensionCount =
           (uint32_t)applicationExtensions.size();
@@ -226,13 +233,39 @@ Manager::createInstance()
     // Identify the valid layer names based on the desiredLayerNames
     {
         std::set<std::string> uniqueLayerNames;
-        std::vector<vk::LayerProperties> availableLayerProperties =
-          vk::enumerateInstanceLayerProperties();
+
+        // std::vector<vk::LayerProperties> availableLayerProperties =
+        //   vk::enumerateInstanceLayerProperties();
+
+        vk::detail::DynamicLoader dl;
+
+        PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
+          dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+          
+        auto vkEnumerateInstanceLayerProperties = 
+          PFN_vkEnumerateInstanceLayerProperties(
+            vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties"));
+
+        uint32_t layerCount;
+
+        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+
+        std::vector<VkLayerProperties> layerProps(layerCount);
+
+        vkEnumerateInstanceLayerProperties(&layerCount, layerProps.data());
+
+        std::vector<vk::LayerProperties> availableLayerProperties;
+        for (const auto& prop : layerProps) {
+            availableLayerProperties.push_back(vk::LayerProperties(prop));
+        }
+        
         for (vk::LayerProperties layerProperties : availableLayerProperties) {
             std::string layerName(layerProperties.layerName.data());
             uniqueLayerNames.insert(layerName);
         }
+        
         KP_LOG_DEBUG("Available layers: {}", fmt::join(uniqueLayerNames, ", "));
+        
         for (const char* desiredLayerName : desiredLayerNames) {
             if (uniqueLayerNames.count(desiredLayerName) != 0) {
                 validLayerNames.push_back(desiredLayerName);
@@ -253,15 +286,20 @@ Manager::createInstance()
     }
 #endif
 
+#if VK_USE_PLATFORM_ANDROID_KHR
+    vk::detail::DynamicLoader dl;
+    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
+      dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
+#endif // VK_USE_PLATFORM_ANDROID_KHR
+
     this->mInstance = std::make_shared<vk::Instance>();
-    auto result = vk::createInstance(
+    vk::Result createInstanceResult = vk::createInstance(
       &computeInstanceCreateInfo, nullptr, this->mInstance.get());
 
-    if(result != vk::Result::eSuccess) {
-        KP_LOG_ERROR(
-          "Failed to initialise Vulkan: ", vk::to_string(result));
-          
-        throw std::runtime_error("Failed to create Vulkan instance");
+    if (createInstanceResult != vk::Result::eSuccess) {
+        throw std::runtime_error("Failed to create instance: " +
+                                 vk::to_string(createInstanceResult));
     }
 
 #if VK_USE_PLATFORM_ANDROID_KHR
@@ -286,7 +324,10 @@ Manager::createInstance()
 #endif
         debugCreateInfo.flags = debugFlags;
 
-        this->mDebugDispatcher.init((VkInstance)*this->mInstance, vkGetInstanceProcAddr);
+        KP_LOG_DEBUG("Kompute Manager init debug dispatcher");
+        this->mDebugDispatcher.init(*this->mInstance, vkGetInstanceProcAddr);
+
+        KP_LOG_DEBUG("Kompute Manager set debug callback");
         this->mDebugReportCallback =
           this->mInstance->createDebugReportCallbackEXT(
             debugCreateInfo, nullptr, this->mDebugDispatcher);
@@ -298,11 +339,11 @@ void
 Manager::clear()
 {
     if (this->mManageResources) {
-        this->mManagedTensors.erase(
-          std::remove_if(begin(this->mManagedTensors),
-                         end(this->mManagedTensors),
-                         [](std::weak_ptr<Tensor> t) { return t.expired(); }),
-          end(this->mManagedTensors));
+        this->mManagedMemObjects.erase(
+          std::remove_if(begin(this->mManagedMemObjects),
+                         end(this->mManagedMemObjects),
+                         [](std::weak_ptr<Memory> m) { return m.expired(); }),
+          end(this->mManagedMemObjects));
         this->mManagedAlgorithms.erase(
           std::remove_if(
             begin(this->mManagedAlgorithms),
@@ -363,7 +404,7 @@ Manager::createDevice(const std::vector<uint32_t>& familyQueueIndices,
 
     KP_LOG_INFO("Using physical device index {} found {}",
                 physicalDeviceIndex,
-                physicalDeviceProperties.deviceName);
+                physicalDeviceProperties.deviceName.data());
 
     if (familyQueueIndices.empty()) {
         // Find compute queue
@@ -438,13 +479,38 @@ Manager::createDevice(const std::vector<uint32_t>& familyQueueIndices,
                      fmt::join(validExtensions, ", "));
     }
 
+    //
+    // Device features
+    //
+
+    // Enable float16, if supported.
+    vk::PhysicalDeviceFeatures2 supportedFeatures;
+    vk::PhysicalDeviceVulkan12Features supportedFeatures12;
+    
+    supportedFeatures.pNext = &supportedFeatures12;
+    
+    physicalDevice.getFeatures2(&supportedFeatures);
+
+    vk::PhysicalDeviceFeatures features;
+    
+    features.shaderInt16 = true;
+    features.shaderStorageImageWriteWithoutFormat = true;
+
+    vk::PhysicalDeviceVulkan12Features features12;
+
+    features12.shaderFloat16 = supportedFeatures12.shaderFloat16;
+    features12.shaderInt8 = supportedFeatures12.shaderInt8;
+
     vk::DeviceCreateInfo deviceCreateInfo(vk::DeviceCreateFlags(),
                                           deviceQueueCreateInfos.size(),
                                           deviceQueueCreateInfos.data(),
                                           {},
                                           {},
                                           validExtensions.size(),
-                                          validExtensions.data());
+                                          validExtensions.data(),
+                                          &features);
+
+    deviceCreateInfo.pNext = &features12;
 
     this->mDevice = std::make_shared<vk::Device>();
     physicalDevice.createDevice(
@@ -501,6 +567,24 @@ std::shared_ptr<vk::Instance>
 Manager::getVkInstance() const
 {
     return this->mInstance;
+}
+
+std::shared_ptr<vk::Device>
+Manager::getVkDevice() const
+{
+    return this->mDevice;
+}
+
+std::shared_ptr<vk::PhysicalDevice>
+Manager::getVkPhysicalDevice() const
+{
+    return this->mPhysicalDevice;
+}
+
+const std::vector<std::shared_ptr<vk::Queue>>&
+Manager::getVkQueues() const
+{
+    return this->mComputeQueues;
 }
 
 }
