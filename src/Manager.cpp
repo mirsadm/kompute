@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "kompute/Manager.hpp"
+#include "fmt/format.h"
 #include "kompute/logger/Logger.hpp"
 #include <fmt/core.h>
-#include <fmt/ranges.h>
 #include <iterator>
 #include <set>
 #include <sstream>
 #include <string>
-#include <unordered_map>
 
 namespace kp {
 
@@ -116,15 +115,14 @@ Manager::destroy()
         this->mManagedAlgorithms.clear();
     }
 
-    if (this->mManageResources && this->mManagedMemObjects.size()) {
-        KP_LOG_DEBUG("Kompute Manager explicitly freeing memory objects");
-        for (const std::weak_ptr<Memory>& weakMemory :
-             this->mManagedMemObjects) {
-            if (std::shared_ptr<Memory> memory = weakMemory.lock()) {
-                memory->destroy();
+    if (this->mManageResources && this->mManagedTensors.size()) {
+        KP_LOG_DEBUG("Kompute Manager explicitly freeing tensors");
+        for (const std::weak_ptr<Tensor>& weakTensor : this->mManagedTensors) {
+            if (std::shared_ptr<Tensor> tensor = weakTensor.lock()) {
+                tensor->destroy();
             }
         }
-        this->mManagedMemObjects.clear();
+        this->mManagedTensors.clear();
     }
 
     if (this->mFreeDevice) {
@@ -163,6 +161,13 @@ Manager::createInstance()
 
     KP_LOG_DEBUG("Kompute Manager creating instance");
 
+#if VK_USE_PLATFORM_ANDROID_KHR
+    vk::DynamicLoader dl;
+    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
+      dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
+#endif // VK_USE_PLATFORM_ANDROID_KHR
+
     this->mFreeInstance = true;
 
     vk::ApplicationInfo applicationInfo;
@@ -179,17 +184,14 @@ Manager::createInstance()
 #endif
 
     vk::InstanceCreateInfo computeInstanceCreateInfo;
-    computeInstanceCreateInfo.pApplicationInfo = &applicationInfo;
 
 #ifdef __APPLE__
-    // Required for backwards compatibility for MacOS M1 devices
-    // https://stackoverflow.com/questions/72374316/validation-error-on-device-extension-on-m1-mac
-    applicationExtensions.push_back(
-      VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-    computeInstanceCreateInfo.flags |=
-      vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
-#endif
+    applicationExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 
+    computeInstanceCreateInfo.flags = vk::InstanceCreateFlags(VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR);
+#endif
+    
+    computeInstanceCreateInfo.pApplicationInfo = &applicationInfo;
     if (!applicationExtensions.empty()) {
         computeInstanceCreateInfo.enabledExtensionCount =
           (uint32_t)applicationExtensions.size();
@@ -251,20 +253,15 @@ Manager::createInstance()
     }
 #endif
 
-#if VK_USE_PLATFORM_ANDROID_KHR
-    vk::DynamicLoader dl;
-    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
-      dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
-#endif // VK_USE_PLATFORM_ANDROID_KHR
-
     this->mInstance = std::make_shared<vk::Instance>();
-    vk::Result createInstanceResult = vk::createInstance(
+    auto result = vk::createInstance(
       &computeInstanceCreateInfo, nullptr, this->mInstance.get());
 
-    if (createInstanceResult != vk::Result::eSuccess) {
-        throw std::runtime_error("Failed to create instance: " +
-                                 vk::to_string(createInstanceResult));
+    if(result != vk::Result::eSuccess) {
+        KP_LOG_ERROR(
+          "Failed to initialise Vulkan: ", vk::to_string(result));
+          
+        throw std::runtime_error("Failed to create Vulkan instance");
     }
 
 #if VK_USE_PLATFORM_ANDROID_KHR
@@ -289,7 +286,7 @@ Manager::createInstance()
 #endif
         debugCreateInfo.flags = debugFlags;
 
-        this->mDebugDispatcher.init(*this->mInstance, &vkGetInstanceProcAddr);
+        this->mDebugDispatcher.init((VkInstance)*this->mInstance, vkGetInstanceProcAddr);
         this->mDebugReportCallback =
           this->mInstance->createDebugReportCallbackEXT(
             debugCreateInfo, nullptr, this->mDebugDispatcher);
@@ -301,11 +298,11 @@ void
 Manager::clear()
 {
     if (this->mManageResources) {
-        this->mManagedMemObjects.erase(
-          std::remove_if(begin(this->mManagedMemObjects),
-                         end(this->mManagedMemObjects),
-                         [](std::weak_ptr<Memory> m) { return m.expired(); }),
-          end(this->mManagedMemObjects));
+        this->mManagedTensors.erase(
+          std::remove_if(begin(this->mManagedTensors),
+                         end(this->mManagedTensors),
+                         [](std::weak_ptr<Tensor> t) { return t.expired(); }),
+          end(this->mManagedTensors));
         this->mManagedAlgorithms.erase(
           std::remove_if(
             begin(this->mManagedAlgorithms),
@@ -366,7 +363,7 @@ Manager::createDevice(const std::vector<uint32_t>& familyQueueIndices,
 
     KP_LOG_INFO("Using physical device index {} found {}",
                 physicalDeviceIndex,
-                physicalDeviceProperties.deviceName.data());
+                physicalDeviceProperties.deviceName);
 
     if (familyQueueIndices.empty()) {
         // Find compute queue
